@@ -5,7 +5,7 @@ const httpProxy = require('http-proxy');
 
 // --- CRITICAL CONFIGURATION ---
 // This is your Magmanodes server's address and dedicated port (34889)
-const TARGET_HOST = 'dottyback.aternos.host:49413';
+const TARGET_HOST = 'mundoeterno_etec.aternos.me';
 const TARGET_PORT = 49413;
 const TARGET = `ws://${TARGET_HOST}:${TARGET_PORT}`;
 // ------------------------------
