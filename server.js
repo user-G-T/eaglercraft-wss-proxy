@@ -5,8 +5,8 @@ const httpProxy = require('http-proxy');
 
 // --- CRITICAL CONFIGURATION ---
 // This is your Magmanodes server's address and dedicated port (34889)
-const TARGET_HOST = '5.9.41.143';
-const TARGET_PORT = 34889;
+const TARGET_HOST = 'bluewhiting.aternos.host';
+const TARGET_PORT = 49413;
 const TARGET = `ws://${TARGET_HOST}:${TARGET_PORT}`;
 // ------------------------------
 
