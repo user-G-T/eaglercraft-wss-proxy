@@ -1,33 +1,41 @@
-const express = require('express');
-const http = require('http');
-const httpProxy = require('http-proxy');
-const dns = require('dns').promises;
+const express = require("express");
+const http = require("http");
+const httpProxy = require("http-proxy");
+const dns = require("dns").promises;
 
 // =====================================================
 // CONFIGURAÇÃO
 // =====================================================
 
-// Endereço PERMANENTE do seu servidor Aternos.
-// NÃO coloque o DynIP (.aternos.host) aqui.
-const ATERNOS_DOMAIN = 'mundoeterno_etec.aternos.me';
-
-// Registro SRV usado pelo Minecraft/Aternos.
+const ATERNOS_DOMAIN = "mundoeterno_etec.aternos.me";
 const SRV_RECORD = `_minecraft._tcp.${ATERNOS_DOMAIN}`;
 
-// Porta do servidor Render.
-// O Render fornece process.env.PORT automaticamente.
 const PROXY_PORT = process.env.PORT || 10000;
 
+// Tempo que o resultado DNS fica em cache.
+// 60 segundos é suficiente para detectar rapidamente
+// uma mudança do servidor Aternos sem consultar DNS
+// a cada jogador.
+const DNS_CACHE_TTL = 60 * 1000;
+
+// Intervalo de heartbeat.
+// Serve para detectar conexões mortas.
+const HEARTBEAT_INTERVAL = 30 * 1000;
+
 // =====================================================
-// SERVIDOR HTTP
+// HTTP
 // =====================================================
 
 const app = express();
+
 const server = http.createServer(app);
 
-// Só para quando você abrir o link no navegador.
-app.get('/', (req, res) => {
-    res.send('Eaglercraft WSS Proxy online!');
+app.get("/", (req, res) => {
+    res.status(200).send("Eaglercraft WSS Proxy online!");
+});
+
+app.get("/health", (req, res) => {
+    res.status(200).send("OK");
 });
 
 // =====================================================
@@ -36,62 +44,121 @@ app.get('/', (req, res) => {
 
 const proxy = httpProxy.createProxyServer({
     ws: true,
-    changeOrigin: true
+
+    // O destino Aternos não precisa receber o Host
+    // original do Render.
+    changeOrigin: true,
+
+    // Não queremos que o proxy fique esperando
+    // indefinidamente por uma conexão.
+    proxyTimeout: 15000,
+
+    // Timeout do socket de entrada.
+    timeout: 0
 });
 
 // =====================================================
-// DESCOBRIR SERVIDOR ATUAL DO ATERNOS
+// CACHE DO ATERNOS
 // =====================================================
 
+let cachedTarget = null;
+let cachedAt = 0;
+
+let dnsPromise = null;
+
 async function getAternosTarget() {
-    console.log(`🔎 Consultando DNS SRV: ${SRV_RECORD}`);
 
-    const records = await dns.resolveSrv(SRV_RECORD);
+    const now = Date.now();
 
-    if (!records || records.length === 0) {
-        throw new Error('Nenhum registro SRV encontrado para o servidor Aternos.');
+    // -------------------------------------------------
+    // CACHE
+    // -------------------------------------------------
+
+    if (
+        cachedTarget &&
+        now - cachedAt < DNS_CACHE_TTL
+    ) {
+        return cachedTarget;
     }
 
-    // Ordena pela prioridade, como manda o funcionamento de SRV.
-    records.sort((a, b) => {
-        if (a.priority !== b.priority) {
-            return a.priority - b.priority;
+    // -------------------------------------------------
+    // EVITAR CONSULTAS DNS SIMULTÂNEAS
+    // -------------------------------------------------
+
+    if (dnsPromise) {
+        return dnsPromise;
+    }
+
+    dnsPromise = (async () => {
+
+        try {
+
+            const records = await dns.resolveSrv(SRV_RECORD);
+
+            if (!records || records.length === 0) {
+                throw new Error(
+                    "Nenhum registro SRV encontrado."
+                );
+            }
+
+            // Prioridade menor = melhor.
+            // Dentro da mesma prioridade,
+            // usamos o maior weight disponível.
+            records.sort((a, b) => {
+
+                if (a.priority !== b.priority) {
+                    return a.priority - b.priority;
+                }
+
+                return b.weight - a.weight;
+            });
+
+            const record = records[0];
+
+            const hostname = record.name.replace(/\.$/, "");
+            const port = record.port;
+
+            cachedTarget = {
+                hostname,
+                port,
+                target: `ws://${hostname}:${port}`
+            };
+
+            cachedAt = Date.now();
+
+            console.log(
+                `🔄 Aternos atualizado: ${hostname}:${port}`
+            );
+
+            return cachedTarget;
+
+        } finally {
+
+            dnsPromise = null;
         }
 
-        return b.weight - a.weight;
-    });
+    })();
 
-    const record = records[0];
-
-    const hostname = record.name.replace(/\.$/, '');
-    const port = record.port;
-
-    console.log('✅ Aternos encontrado:');
-    console.log(`   Host: ${hostname}`);
-    console.log(`   Porta: ${port}`);
-
-    return {
-        hostname,
-        port,
-        target: `ws://${hostname}:${port}`
-    };
+    return dnsPromise;
 }
+
+// =====================================================
+// CONEXÕES ATIVAS
+// =====================================================
+
+let activeConnections = 0;
 
 // =====================================================
 // WEBSOCKET
 // =====================================================
 
-server.on('upgrade', async (req, socket, head) => {
-    console.log('');
-    console.log('========================================');
-    console.log('📡 Nova conexão WebSocket recebida');
-    console.log('========================================');
+server.on("upgrade", async (req, socket, head) => {
+
+    activeConnections++;
 
     try {
-        // Descobre o destino ATUAL do Aternos.
-        const destination = await getAternosTarget();
 
-        console.log(`🔗 Conectando em: ${destination.target}`);
+        const destination = await getAternosTarget();
 
         proxy.ws(
             req,
@@ -100,46 +167,128 @@ server.on('upgrade', async (req, socket, head) => {
             {
                 target: destination.target,
                 ws: true,
-                changeOrigin: true
+                changeOrigin: true,
+
+                // Não adicionamos compressão no proxy.
+                // O EaglerXServer já possui suas próprias
+                // limitações de compressão.
+                perMessageDeflate: false
             },
             (error) => {
-                console.error('❌ Erro ao conectar no Aternos:', error);
+
+                if (error) {
+
+                    console.error(
+                        "❌ Erro WebSocket:",
+                        error.message
+                    );
+
+                }
 
                 try {
                     socket.destroy();
                 } catch {}
+
             }
         );
 
     } catch (error) {
-        console.error('❌ Não foi possível descobrir o servidor Aternos.');
-        console.error(error);
+
+        console.error(
+            "❌ Erro DNS Aternos:",
+            error.message
+        );
 
         try {
             socket.destroy();
         } catch {}
+
     }
+
+    socket.once("close", () => {
+        activeConnections--;
+    });
+
+    socket.once("error", () => {
+        activeConnections--;
+    });
 });
 
 // =====================================================
 // ERROS DO PROXY
 // =====================================================
 
-proxy.on('error', (err) => {
-    console.error('❌ Proxy Error:', err.message);
+proxy.on("error", (err) => {
+
+    console.error(
+        "❌ Proxy:",
+        err.message
+    );
+
 });
+
+// =====================================================
+// ERROS HTTP
+// =====================================================
+
+server.on("clientError", (err, socket) => {
+
+    if (!socket.destroyed) {
+        socket.destroy();
+    }
+
+});
+
+// =====================================================
+// STATUS
+// =====================================================
+
+setInterval(() => {
+
+    console.log(
+        `📊 Conexões ativas: ${activeConnections}`
+    );
+
+}, 60000);
+
+// =====================================================
+// SHUTDOWN
+// =====================================================
+
+function shutdown() {
+
+    console.log("🛑 Encerrando proxy...");
+
+    server.close(() => {
+
+        console.log("✅ Proxy encerrado.");
+
+        process.exit(0);
+
+    });
+
+}
+
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
 
 // =====================================================
 // INICIAR
 // =====================================================
 
-server.listen(PROXY_PORT, () => {
-    console.log('');
-    console.log('========================================');
-    console.log('🚀 Eaglercraft WSS Proxy iniciado');
-    console.log('========================================');
-    console.log(`Porta Render: ${PROXY_PORT}`);
-    console.log(`Aternos: ${ATERNOS_DOMAIN}`);
-    console.log(`SRV: ${SRV_RECORD}`);
-    console.log('========================================');
-});
+server.listen(
+    PROXY_PORT,
+    "0.0.0.0",
+    () => {
+
+        console.log("");
+        console.log("========================================");
+        console.log("🚀 EAGLERCRAFT WSS PROXY");
+        console.log("========================================");
+        console.log(`Porta: ${PROXY_PORT}`);
+        console.log(`Aternos: ${ATERNOS_DOMAIN}`);
+        console.log(`SRV: ${SRV_RECORD}`);
+        console.log("========================================");
+        console.log("");
+    }
+);
