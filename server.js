@@ -2,6 +2,7 @@ const express = require("express");
 const http = require("http");
 const httpProxy = require("http-proxy");
 const dns = require("dns").promises;
+const net = require("net");
 
 // =====================================================
 // CONFIGURAÇÃO
@@ -12,22 +13,11 @@ const SRV_RECORD = `_minecraft._tcp.${ATERNOS_DOMAIN}`;
 
 const PROXY_PORT = process.env.PORT || 10000;
 
-// Tempo que o resultado DNS fica em cache.
-// 60 segundos é suficiente para detectar rapidamente
-// uma mudança do servidor Aternos sem consultar DNS
-// a cada jogador.
-const DNS_CACHE_TTL = 60 * 1000;
-
-// Intervalo de heartbeat.
-// Serve para detectar conexões mortas.
-const HEARTBEAT_INTERVAL = 30 * 1000;
-
 // =====================================================
 // HTTP
 // =====================================================
 
 const app = express();
-
 const server = http.createServer(app);
 
 app.get("/", (req, res) => {
@@ -44,134 +34,281 @@ app.get("/health", (req, res) => {
 
 const proxy = httpProxy.createProxyServer({
     ws: true,
-
-    // O destino Aternos não precisa receber o Host
-    // original do Render.
     changeOrigin: true,
-
-    // Não queremos que o proxy fique esperando
-    // indefinidamente por uma conexão.
     proxyTimeout: 15000,
-
-    // Timeout do socket de entrada.
     timeout: 0
 });
 
 // =====================================================
-// CACHE DO ATERNOS
+// DNS SRV
 // =====================================================
-
-let cachedTarget = null;
-let cachedAt = 0;
-
-let dnsPromise = null;
 
 async function getAternosTarget() {
 
-    const now = Date.now();
+    console.log("");
+    console.log("🔎 ========================================");
+    console.log("🔎 TESTE 1: DNS SRV");
+    console.log("🔎 ========================================");
 
-    // -------------------------------------------------
-    // CACHE
-    // -------------------------------------------------
+    console.log(`🔎 Consultando: ${SRV_RECORD}`);
 
-    if (
-        cachedTarget &&
-        now - cachedAt < DNS_CACHE_TTL
-    ) {
-        return cachedTarget;
+    const records = await dns.resolveSrv(SRV_RECORD);
+
+    if (!records || records.length === 0) {
+        throw new Error("Nenhum registro SRV encontrado.");
     }
 
-    // -------------------------------------------------
-    // EVITAR CONSULTAS DNS SIMULTÂNEAS
-    // -------------------------------------------------
+    records.sort((a, b) => {
 
-    if (dnsPromise) {
-        return dnsPromise;
-    }
-
-    dnsPromise = (async () => {
-
-        try {
-
-            const records = await dns.resolveSrv(SRV_RECORD);
-
-            if (!records || records.length === 0) {
-                throw new Error(
-                    "Nenhum registro SRV encontrado."
-                );
-            }
-
-            // Prioridade menor = melhor.
-            // Dentro da mesma prioridade,
-            // usamos o maior weight disponível.
-            records.sort((a, b) => {
-
-                if (a.priority !== b.priority) {
-                    return a.priority - b.priority;
-                }
-
-                return b.weight - a.weight;
-            });
-
-            const record = records[0];
-
-            const hostname = record.name.replace(/\.$/, "");
-            const port = record.port;
-
-            cachedTarget = {
-                hostname,
-                port,
-                target: `ws://${hostname}:${port}`
-            };
-
-            cachedAt = Date.now();
-
-            console.log(
-                `🔄 Aternos atualizado: ${hostname}:${port}`
-            );
-
-            return cachedTarget;
-
-        } finally {
-
-            dnsPromise = null;
+        if (a.priority !== b.priority) {
+            return a.priority - b.priority;
         }
 
-    })();
+        return b.weight - a.weight;
 
-    return dnsPromise;
+    });
+
+    const record = records[0];
+
+    const hostname = record.name.replace(/\.$/, "");
+    const port = record.port;
+
+    console.log("✅ DNS SRV FUNCIONOU");
+    console.log(`   Host: ${hostname}`);
+    console.log(`   Porta: ${port}`);
+
+    return {
+        hostname,
+        port
+    };
 }
 
 // =====================================================
-// CONEXÕES ATIVAS
+// DNS A
 // =====================================================
 
-let activeConnections = 0;
+async function resolveHostname(hostname) {
+
+    console.log("");
+    console.log("🔎 ========================================");
+    console.log("🔎 TESTE 2: DNS A");
+    console.log("🔎 ========================================");
+
+    console.log(`🔎 Resolvendo: ${hostname}`);
+
+    const addresses = await dns.resolve4(hostname);
+
+    if (!addresses || addresses.length === 0) {
+        throw new Error("Nenhum endereço IPv4 encontrado.");
+    }
+
+    console.log("✅ DNS A FUNCIONOU");
+
+    for (const ip of addresses) {
+        console.log(`   IP: ${ip}`);
+    }
+
+    return addresses[0];
+}
+
+// =====================================================
+// TESTE TCP
+// =====================================================
+
+function testTCP(host, port) {
+
+    return new Promise((resolve) => {
+
+        console.log("");
+        console.log("🔎 ========================================");
+        console.log("🔎 TESTE 3: TCP");
+        console.log("🔎 ========================================");
+
+        console.log(`🔌 Testando: ${host}:${port}`);
+        console.log("⏳ Timeout: 15 segundos");
+
+        const socket = new net.Socket();
+
+        const start = Date.now();
+
+        let finished = false;
+
+        function finish(result) {
+
+            if (finished) {
+                return;
+            }
+
+            finished = true;
+
+            try {
+                socket.destroy();
+            } catch {}
+
+            resolve(result);
+        }
+
+        socket.setTimeout(15000);
+
+        socket.connect(port, host, () => {
+
+            const elapsed = Date.now() - start;
+
+            console.log("");
+            console.log("🟢 ========================================");
+            console.log("🟢 TCP FUNCIONOU!");
+            console.log("🟢 ========================================");
+
+            console.log(`🟢 Conectou em ${elapsed}ms`);
+
+            finish(true);
+        });
+
+        socket.on("timeout", () => {
+
+            const elapsed = Date.now() - start;
+
+            console.log("");
+            console.log("🔴 ========================================");
+            console.log("🔴 TCP TIMEOUT!");
+            console.log("🔴 ========================================");
+
+            console.log(`🔴 Nenhuma resposta após ${elapsed}ms`);
+            console.log(`🔴 Destino: ${host}:${port}`);
+
+            finish(false);
+        });
+
+        socket.on("error", (error) => {
+
+            const elapsed = Date.now() - start;
+
+            console.log("");
+            console.log("🔴 ========================================");
+            console.log("🔴 TCP ERRO!");
+            console.log("🔴 ========================================");
+
+            console.log(`🔴 Erro: ${error.message}`);
+            console.log(`🔴 Tempo: ${elapsed}ms`);
+            console.log(`🔴 Destino: ${host}:${port}`);
+
+            finish(false);
+        });
+
+    });
+}
+
+// =====================================================
+// TESTE COMPLETO
+// =====================================================
+
+async function runDiagnostic() {
+
+    console.log("");
+    console.log("========================================");
+    console.log("🧪 DIAGNÓSTICO ATERNOS");
+    console.log("========================================");
+
+    try {
+
+        // TESTE 1
+        const destination = await getAternosTarget();
+
+        // TESTE 2
+        const ip = await resolveHostname(
+            destination.hostname
+        );
+
+        // TESTE 3
+        const tcpOK = await testTCP(
+            ip,
+            destination.port
+        );
+
+        console.log("");
+        console.log("========================================");
+        console.log("📋 RESULTADO");
+        console.log("========================================");
+
+        console.log(
+            `DNS SRV:       ✅`
+        );
+
+        console.log(
+            `DNS A:         ✅`
+        );
+
+        console.log(
+            `TCP Aternos:   ${tcpOK ? "✅ FUNCIONOU" : "❌ FALHOU"}`
+        );
+
+        console.log(
+            `Destino:       ${ip}:${destination.port}`
+        );
+
+        console.log("========================================");
+
+        return {
+            hostname: destination.hostname,
+            port: destination.port,
+            ip,
+            tcpOK
+        };
+
+    } catch (error) {
+
+        console.log("");
+        console.log("========================================");
+        console.log("❌ DIAGNÓSTICO FALHOU");
+        console.log("========================================");
+
+        console.error(error);
+
+        console.log("========================================");
+
+        return null;
+    }
+}
 
 // =====================================================
 // WEBSOCKET
 // =====================================================
 
+let activeConnections = 0;
+
 server.on("upgrade", async (req, socket, head) => {
 
     activeConnections++;
 
+    console.log("");
+    console.log("========================================");
+    console.log("📡 WEBSOCKET RECEBIDO");
+    console.log("========================================");
+
     try {
 
         const destination = await getAternosTarget();
+
+        const ip = await resolveHostname(
+            destination.hostname
+        );
+
+        console.log("");
+        console.log("🔗 Tentando WebSocket:");
+        console.log(
+            `   ws://${destination.hostname}:${destination.port}`
+        );
 
         proxy.ws(
             req,
             socket,
             head,
             {
-                target: destination.target,
+                target:
+                    `ws://${destination.hostname}:${destination.port}`,
+
                 ws: true,
                 changeOrigin: true,
-
-                // Não adicionamos compressão no proxy.
-                // O EaglerXServer já possui suas próprias
-                // limitações de compressão.
                 perMessageDeflate: false
             },
             (error) => {
@@ -179,7 +316,7 @@ server.on("upgrade", async (req, socket, head) => {
                 if (error) {
 
                     console.error(
-                        "❌ Erro WebSocket:",
+                        "❌ WebSocket → Aternos:",
                         error.message
                     );
 
@@ -188,34 +325,28 @@ server.on("upgrade", async (req, socket, head) => {
                 try {
                     socket.destroy();
                 } catch {}
-
             }
         );
 
     } catch (error) {
 
         console.error(
-            "❌ Erro DNS Aternos:",
+            "❌ Erro preparando conexão:",
             error.message
         );
 
         try {
             socket.destroy();
         } catch {}
-
     }
 
     socket.once("close", () => {
         activeConnections--;
     });
-
-    socket.once("error", () => {
-        activeConnections--;
-    });
 });
 
 // =====================================================
-// ERROS DO PROXY
+// ERROS
 // =====================================================
 
 proxy.on("error", (err) => {
@@ -226,10 +357,6 @@ proxy.on("error", (err) => {
     );
 
 });
-
-// =====================================================
-// ERROS HTTP
-// =====================================================
 
 server.on("clientError", (err, socket) => {
 
@@ -252,34 +379,13 @@ setInterval(() => {
 }, 60000);
 
 // =====================================================
-// SHUTDOWN
-// =====================================================
-
-function shutdown() {
-
-    console.log("🛑 Encerrando proxy...");
-
-    server.close(() => {
-
-        console.log("✅ Proxy encerrado.");
-
-        process.exit(0);
-
-    });
-
-}
-
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
-
-// =====================================================
 // INICIAR
 // =====================================================
 
 server.listen(
     PROXY_PORT,
     "0.0.0.0",
-    () => {
+    async () => {
 
         console.log("");
         console.log("========================================");
@@ -289,6 +395,9 @@ server.listen(
         console.log(`Aternos: ${ATERNOS_DOMAIN}`);
         console.log(`SRV: ${SRV_RECORD}`);
         console.log("========================================");
-        console.log("");
+
+        // Executa o diagnóstico automaticamente
+        // assim que o Render iniciar.
+        await runDiagnostic();
     }
 );
