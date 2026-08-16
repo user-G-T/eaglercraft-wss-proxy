@@ -2,12 +2,13 @@ const express = require("express");
 const http = require("http");
 const httpProxy = require("http-proxy");
 const dns = require("dns").promises;
-const net = require("net");
 
 const ATERNOS_DOMAIN = "mundoeterno_etec.aternos.me";
 const SRV_RECORD = `_minecraft._tcp.${ATERNOS_DOMAIN}`;
 
-const PORT = process.env.PORT || 10000;
+const PROXY_PORT = process.env.PORT || 10000;
+
+const DNS_CACHE_TTL = 60 * 1000;
 
 const app = express();
 const server = http.createServer(app);
@@ -23,389 +24,195 @@ app.get("/health", (req, res) => {
 const proxy = httpProxy.createProxyServer({
     ws: true,
     changeOrigin: true,
-    proxyTimeout: 10000,
-    perMessageDeflate: false
+    proxyTimeout: 15000,
+    timeout: 0
 });
 
-async function getTargets() {
+let cachedTarget = null;
+let cachedAt = 0;
+let dnsPromise = null;
 
-    console.log("");
-    console.log("🔎 Consultando SRV:");
-    console.log(SRV_RECORD);
+async function getAternosTarget() {
 
-    const srv = await dns.resolveSrv(SRV_RECORD);
+    const now = Date.now();
 
-    if (!srv.length) {
-        throw new Error("Nenhum registro SRV encontrado.");
+    if (
+        cachedTarget &&
+        now - cachedAt < DNS_CACHE_TTL
+    ) {
+        return cachedTarget;
     }
 
-    srv.sort((a, b) => {
+    if (dnsPromise) {
+        return dnsPromise;
+    }
 
-        if (a.priority !== b.priority) {
-            return a.priority - b.priority;
-        }
-
-        return b.weight - a.weight;
-    });
-
-    const targets = [];
-
-    for (const record of srv) {
-
-        const hostname =
-            record.name.replace(/\.$/, "");
-
-        const port = record.port;
-
-        console.log("");
-        console.log("📡 SRV encontrado:");
-        console.log("   Host: " + hostname);
-        console.log("   Porta: " + port);
+    dnsPromise = (async () => {
 
         try {
 
-            const ips =
-                await dns.resolve4(hostname);
+            const records = await dns.resolveSrv(SRV_RECORD);
 
-            for (const ip of ips) {
-
-                console.log("   IP: " + ip);
-
-                targets.push({
-                    hostname,
-                    ip,
-                    port
-                });
+            if (!records || records.length === 0) {
+                throw new Error(
+                    "Nenhum registro SRV encontrado."
+                );
             }
 
-        } catch (error) {
+            records.sort((a, b) => {
 
-            console.error(
-                "❌ Não conseguiu resolver " +
-                hostname +
-                ": " +
-                error.message
+                if (a.priority !== b.priority) {
+                    return a.priority - b.priority;
+                }
+
+                return b.weight - a.weight;
+            });
+
+            const record = records[0];
+
+            const hostname = record.name.replace(/\.$/, "");
+            const port = record.port;
+
+            cachedTarget = {
+                hostname,
+                port,
+                target: `ws://${hostname}:${port}`
+            };
+
+            cachedAt = Date.now();
+
+            console.log(
+                `🔄 Aternos atualizado: ${hostname}:${port}`
             );
+
+            return cachedTarget;
+
+        } finally {
+
+            dnsPromise = null;
         }
-    }
 
-    if (!targets.length) {
-        throw new Error(
-            "Nenhum destino IPv4 encontrado."
-        );
-    }
+    })();
 
-    return targets;
+    return dnsPromise;
 }
 
-function testTCP(ip, port, timeout = 8000) {
+let activeConnections = 0;
 
-    return new Promise((resolve) => {
+server.on("upgrade", async (req, socket, head) => {
 
-        const socket = new net.Socket();
+    activeConnections++;
 
-        let finished = false;
+    console.log("");
+    console.log("========================================");
+    console.log("📡 Nova conexão WebSocket recebida");
+    console.log("========================================");
 
-        const start = Date.now();
+    try {
 
-        function finish(result) {
+        const destination = await getAternosTarget();
 
-            if (finished) {
-                return;
-            }
-
-            finished = true;
-
-            try {
-                socket.destroy();
-            } catch {}
-
-            resolve(result);
-        }
-
-        socket.setTimeout(timeout);
-
-        socket.connect(
-            port,
-            ip,
-            () => {
-
-                const time =
-                    Date.now() - start;
-
-                console.log(
-                    "🟢 TCP OK " +
-                    ip +
-                    ":" +
-                    port +
-                    " (" +
-                    time +
-                    "ms)"
-                );
-
-                finish(true);
-            }
+        console.log(
+            `🔗 Conectando em: ${destination.target}`
         );
 
-        socket.on(
-            "timeout",
-            () => {
-
-                console.log(
-                    "🔴 TCP TIMEOUT " +
-                    ip +
-                    ":" +
-                    port
-                );
-
-                finish(false);
-            }
-        );
-
-        socket.on(
-            "error",
+        proxy.ws(
+            req,
+            socket,
+            head,
+            {
+                target: destination.target,
+                ws: true,
+                changeOrigin: true,
+                perMessageDeflate: false
+            },
             (error) => {
 
-                console.log(
-                    "🔴 TCP ERRO " +
-                    ip +
-                    ":" +
-                    port +
-                    " → " +
-                    (error.code ||
-                        error.message)
-                );
+                if (error) {
 
-                finish(false);
+                    console.error(
+                        "❌ Erro WebSocket:",
+                        error.message
+                    );
+
+                }
+
+                try {
+                    socket.destroy();
+                } catch {}
             }
         );
-    });
-}
 
-async function findWorkingTarget() {
+    } catch (error) {
 
-    const targets =
-        await getTargets();
-
-    console.log("");
-    console.log(
-        "========================================"
-    );
-    console.log(
-        "🧪 TESTANDO CONECTIVIDADE"
-    );
-    console.log(
-        "========================================"
-    );
-
-    for (const target of targets) {
-
-        const ok =
-            await testTCP(
-                target.ip,
-                target.port
-            );
-
-        if (ok) {
-
-            console.log("");
-            console.log(
-                "========================================"
-            );
-            console.log(
-                "🟢 DESTINO FUNCIONANDO"
-            );
-            console.log(
-                "========================================"
-            );
-
-            console.log(
-                target.hostname +
-                ":" +
-                target.port
-            );
-
-            console.log(
-                "IP: " +
-                target.ip
-            );
-
-            console.log(
-                "========================================"
-            );
-
-            return target;
-        }
-    }
-
-    throw new Error(
-        "Nenhum destino Aternos aceitou conexão TCP."
-    );
-}
-
-let connections = 0;
-
-server.on(
-    "upgrade",
-    async (req, socket, head) => {
-
-        connections++;
-
-        console.log("");
-        console.log(
-            "========================================"
-        );
-        console.log(
-            "📡 NOVA CONEXÃO EAGLERCRAFT"
-        );
-        console.log(
-            "========================================"
+        console.error(
+            "❌ Erro DNS Aternos:",
+            error.message
         );
 
         try {
-
-            const target =
-                await findWorkingTarget();
-
-            console.log("");
-            console.log(
-                "🔗 Encaminhando para:"
-            );
-
-            console.log(
-                "ws://" +
-                target.hostname +
-                ":" +
-                target.port
-            );
-
-            proxy.ws(
-                req,
-                socket,
-                head,
-                {
-                    target:
-                        "ws://" +
-                        target.hostname +
-                        ":" +
-                        target.port,
-
-                    ws: true,
-                    changeOrigin: true,
-                    perMessageDeflate: false
-                },
-                (error) => {
-
-                    if (error) {
-
-                        console.error(
-                            "❌ Erro WebSocket:",
-                            error.message
-                        );
-
-                        try {
-                            socket.destroy();
-                        } catch {}
-                    }
-                }
-            );
-
-        } catch (error) {
-
-            console.error("");
-            console.error(
-                "❌ ATERNOS INACESSÍVEL"
-            );
-
-            console.error(
-                error.message
-            );
-
-            try {
-                socket.destroy();
-            } catch {}
-        }
-
-        socket.once(
-            "close",
-            () => {
-
-                connections--;
-
-                if (connections < 0) {
-                    connections = 0;
-                }
-            }
-        );
-    }
-);
-
-proxy.on(
-    "error",
-    (error) => {
-
-        console.error(
-            "❌ Proxy:",
-            error.message
-        );
-    }
-);
-
-server.on(
-    "clientError",
-    (error, socket) => {
-
-        if (!socket.destroyed) {
             socket.destroy();
-        }
+        } catch {}
     }
-);
 
-setInterval(
-    () => {
+    socket.once("close", () => {
+        activeConnections--;
+    });
+});
 
-        console.log(
-            "📊 Conexões ativas: " +
-            connections
-        );
+proxy.on("error", (err) => {
 
-    },
-    30000
-);
+    console.error(
+        "❌ Proxy:",
+        err.message
+    );
+
+});
+
+server.on("clientError", (err, socket) => {
+
+    if (!socket.destroyed) {
+        socket.destroy();
+    }
+
+});
+
+setInterval(() => {
+
+    console.log(
+        `📊 Conexões ativas: ${activeConnections}`
+    );
+
+}, 60000);
+
+function shutdown() {
+
+    console.log("🛑 Encerrando proxy...");
+
+    server.close(() => {
+
+        console.log("✅ Proxy encerrado.");
+
+        process.exit(0);
+
+    });
+}
+
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
 
 server.listen(
-    PORT,
+    PROXY_PORT,
     "0.0.0.0",
     () => {
 
         console.log("");
-        console.log(
-            "========================================"
-        );
-        console.log(
-            "🚀 EAGLERCRAFT WSS PROXY"
-        );
-        console.log(
-            "========================================"
-        );
-
-        console.log(
-            "Porta: " +
-            PORT
-        );
-
-        console.log(
-            "Aternos: " +
-            ATERNOS_DOMAIN
-        );
-
-        console.log(
-            "SRV: " +
-            SRV_RECORD
-        );
-
-        console.log(
-            "========================================"
-        );
+        console.log("========================================");
+        console.log("🚀 Eaglercraft WSS Proxy iniciado");
+        console.log("========================================");
+        console.log(`Porta Render: ${PROXY_PORT}`);
+        console.log(`Aternos: ${ATERNOS_DOMAIN}`);
+        console.log(`SRV: ${SRV_RECORD}`);
+        console.log("========================================");
     }
 );
