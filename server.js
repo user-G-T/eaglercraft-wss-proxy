@@ -5,44 +5,35 @@ const httpProxy = require("http-proxy");
 const dns = require("dns").promises;
 const net = require("net");
 
-const app = express();
-const server = http.createServer(app);
-
 // =====================================================
 // CONFIGURAÇÃO
 // =====================================================
 
-// ATERNOS
 const ATERNOS_HOST =
-    process.env.ATERNOS_HOST ||
-    "mundoeterno_etec.aternos.me";
+    process.env.ATERNOS_HOST || "mundoeterno_etec.aternos.me";
 
 const ATERNOS_PORT =
     Number(process.env.ATERNOS_PORT) || 49413;
 
-
-// FALIX
 const FALIX_HOST =
-    process.env.FALIX_HOST ||
-    "mundoeternoetec.falix.me";
+    process.env.FALIX_HOST || "mundoeternoetec.falix.me";
 
 const FALIX_PORT =
     Number(process.env.FALIX_PORT) || 22899;
 
-
-// RENDER
 const PORT =
     Number(process.env.PORT) || 10000;
 
 
 // =====================================================
-// HTTP
+// SERVIDOR HTTP
 // =====================================================
 
+const app = express();
+const server = http.createServer(app);
+
 app.get("/", (req, res) => {
-    res.status(200).send(
-        "Eaglercraft WSS Proxy - Aternos + Falix"
-    );
+    res.status(200).send("Eaglercraft WSS Proxy - Aternos + Falix");
 });
 
 app.get("/health", (req, res) => {
@@ -51,7 +42,7 @@ app.get("/health", (req, res) => {
 
 
 // =====================================================
-// WEBSOCKET PROXY
+// PROXY WEBSOCKET
 // =====================================================
 
 const proxy = httpProxy.createProxyServer({
@@ -64,49 +55,53 @@ const proxy = httpProxy.createProxyServer({
 
 
 // =====================================================
-// DNS
+// RESOLVER DNS
 // =====================================================
 
 async function resolveHost(host) {
+    try {
+        const addresses = await dns.resolve4(host);
 
-    const addresses =
-        await dns.resolve4(host);
+        if (!addresses || addresses.length === 0) {
+            throw new Error("Nenhum IP encontrado para " + host);
+        }
 
-    if (!addresses.length) {
+        return addresses;
+
+    } catch (error) {
         throw new Error(
-            `Nenhum IP encontrado para ${host}`
+            "Erro ao resolver " + host + ": " + error.message
         );
     }
-
-    return addresses;
 }
 
 
 // =====================================================
-// CRIAR DESTINOS
+// OBTER DESTINOS
 // =====================================================
 
 async function getTargets() {
-
     const targets = [];
-
 
     // -------------------------------------------------
     // FALIX
     // -------------------------------------------------
 
+    console.log("");
+    console.log("========================================");
+    console.log("🔎 PROCURANDO FALIX");
+    console.log("========================================");
+
     try {
-
-        console.log("");
-        console.log("🔎 Procurando Falix...");
-        console.log(
-            `${FALIX_HOST}:${FALIX_PORT}`
-        );
-
-        const ips =
-            await resolveHost(FALIX_HOST);
+        const ips = await resolveHost(FALIX_HOST);
 
         for (const ip of ips) {
+            console.log(
+                "📡 Falix encontrado: " +
+                ip +
+                ":" +
+                FALIX_PORT
+            );
 
             targets.push({
                 provider: "Falix",
@@ -114,18 +109,11 @@ async function getTargets() {
                 ip: ip,
                 port: FALIX_PORT
             });
-
-            console.log(
-                `📡 Falix IP: ${ip}`
-            );
         }
 
     } catch (error) {
-
-        console.log(
-            `⚠️ Falix não encontrado: ${error.message}`
-        );
-
+        console.log("⚠️ Falix indisponível:");
+        console.log(error.message);
     }
 
 
@@ -133,18 +121,21 @@ async function getTargets() {
     // ATERNOS
     // -------------------------------------------------
 
+    console.log("");
+    console.log("========================================");
+    console.log("🔎 PROCURANDO ATERNOS");
+    console.log("========================================");
+
     try {
-
-        console.log("");
-        console.log("🔎 Procurando Aternos...");
-        console.log(
-            `${ATERNOS_HOST}:${ATERNOS_PORT}`
-        );
-
-        const ips =
-            await resolveHost(ATERNOS_HOST);
+        const ips = await resolveHost(ATERNOS_HOST);
 
         for (const ip of ips) {
+            console.log(
+                "📡 Aternos encontrado: " +
+                ip +
+                ":" +
+                ATERNOS_PORT
+            );
 
             targets.push({
                 provider: "Aternos",
@@ -152,164 +143,131 @@ async function getTargets() {
                 ip: ip,
                 port: ATERNOS_PORT
             });
-
-            console.log(
-                `📡 Aternos IP: ${ip}`
-            );
         }
 
     } catch (error) {
-
-        console.log(
-            `⚠️ Aternos não encontrado: ${error.message}`
-        );
-
+        console.log("⚠️ Aternos indisponível:");
+        console.log(error.message);
     }
-
 
     return targets;
 }
 
 
 // =====================================================
-// TESTAR TCP
+// TESTE TCP
 // =====================================================
 
-function testTCP(ip, port) {
-
+function testTCP(ip, port, timeout = 8000) {
     return new Promise((resolve) => {
+        const socket = new net.Socket();
 
-        const socket =
-            new net.Socket();
-
-        let done = false;
-
+        let finished = false;
 
         function finish(result) {
+            if (finished) {
+                return;
+            }
 
-            if (done) return;
-
-            done = true;
+            finished = true;
 
             try {
                 socket.destroy();
-            } catch {}
+            } catch (_) {}
 
             resolve(result);
         }
 
+        socket.setTimeout(timeout);
 
-        socket.setTimeout(8000);
+        socket.connect(port, ip, () => {
+            console.log(
+                "🟢 TCP OK: " +
+                ip +
+                ":" +
+                port
+            );
 
+            finish(true);
+        });
 
-        socket.connect(
-            port,
-            ip,
-            () => {
+        socket.on("timeout", () => {
+            console.log(
+                "🔴 TCP TIMEOUT: " +
+                ip +
+                ":" +
+                port
+            );
 
-                console.log(
-                    `🟢 TCP OK: ${ip}:${port}`
-                );
+            finish(false);
+        });
 
-                finish(true);
-            }
-        );
+        socket.on("error", (error) => {
+            console.log(
+                "🔴 TCP ERRO: " +
+                ip +
+                ":" +
+                port +
+                " -> " +
+                (error.code || error.message)
+            );
 
-
-        socket.on(
-            "timeout",
-            () => {
-
-                console.log(
-                    `🔴 Timeout: ${ip}:${port}`
-                );
-
-                finish(false);
-            }
-        );
-
-
-        socket.on(
-            "error",
-            (error) => {
-
-                console.log(
-                    `🔴 Erro TCP ${ip}:${port}: ${error.code || error.message}`
-                );
-
-                finish(false);
-            }
-        );
-
+            finish(false);
+        });
     });
 }
 
 
 // =====================================================
-// ESCOLHER SERVIDOR
+// ENCONTRAR SERVIDOR ONLINE
 // =====================================================
 
-async function findServer() {
+async function findWorkingServer() {
+    const targets = await getTargets();
 
-    const targets =
-        await getTargets();
-
-
-    if (!targets.length) {
-
+    if (targets.length === 0) {
         throw new Error(
             "Nenhum servidor foi encontrado."
         );
     }
 
-
     console.log("");
-    console.log(
-        "========== TESTANDO SERVIDORES =========="
-    );
+    console.log("========================================");
+    console.log("🧪 TESTANDO SERVIDORES");
+    console.log("========================================");
 
-
-    // IMPORTANTE:
-    // Falix vem primeiro.
+    // Falix é testado primeiro.
     // Se estiver offline, tenta Aternos.
 
     for (const target of targets) {
-
         console.log("");
         console.log(
-            `🔎 Testando ${target.provider}`
+            "🔎 Testando " +
+            target.provider +
+            "..."
         );
 
-        console.log(
-            `${target.host}:${target.port}`
+        const online = await testTCP(
+            target.ip,
+            target.port
         );
-
-
-        const online =
-            await testTCP(
-                target.ip,
-                target.port
-            );
-
 
         if (online) {
-
             console.log("");
+            console.log("========================================");
             console.log(
-                `🟢 ${target.provider} ONLINE`
+                "🟢 " +
+                target.provider +
+                " ONLINE"
             );
-
-            console.log(
-                `${target.ip}:${target.port}`
-            );
+            console.log("========================================");
 
             return target;
         }
     }
 
-
     throw new Error(
-        "Nenhum dos servidores está online."
+        "Falix e Aternos foram encontrados, mas nenhum está aceitando conexões."
     );
 }
 
@@ -322,7 +280,7 @@ let connections = 0;
 
 
 // =====================================================
-// WEBSOCKET
+// WEBSOCKET EAGLERCRAFT
 // =====================================================
 
 server.on(
@@ -331,36 +289,25 @@ server.on(
 
         connections++;
 
-
         console.log("");
-        console.log(
-            "========================================"
-        );
-
-        console.log(
-            "📡 NOVA CONEXÃO EAGLERCRAFT"
-        );
-
-        console.log(
-            "========================================"
-        );
-
+        console.log("========================================");
+        console.log("📡 NOVA CONEXÃO EAGLERCRAFT");
+        console.log("========================================");
 
         try {
-
-            const target =
-                await findServer();
-
+            const target = await findWorkingServer();
 
             console.log("");
             console.log(
-                `🔗 Destino: ${target.provider}`
+                "🔗 Encaminhando para " +
+                target.provider
             );
 
             console.log(
-                `${target.ip}:${target.port}`
+                target.ip +
+                ":" +
+                target.port
             );
-
 
             proxy.ws(
                 req,
@@ -368,74 +315,67 @@ server.on(
                 head,
                 {
                     target:
-                        `ws://${target.ip}:${target.port}`,
+                        "ws://" +
+                        target.ip +
+                        ":" +
+                        target.port,
 
                     ws: true,
-
                     changeOrigin: true,
-
                     perMessageDeflate: false
                 },
                 (error) => {
 
                     if (error) {
-
                         console.error(
-                            "❌ Erro WebSocket:",
+                            "❌ Erro WebSocket: " +
                             error.message
                         );
 
                         try {
                             socket.destroy();
-                        } catch {}
+                        } catch (_) {}
                     }
                 }
             );
 
-
         } catch (error) {
 
             console.error("");
-            console.error(
-                "❌ SERVIDOR INDISPONÍVEL"
-            );
-
-            console.error(
-                error.message
-            );
-
+            console.error("❌ SERVIDOR INDISPONÍVEL");
+            console.error(error.message);
 
             try {
                 socket.destroy();
-            } catch {}
+            } catch (_) {}
         }
 
+        socket.once("close", () => {
+            connections--;
 
-        socket.once(
-            "close",
-            () => {
-                connections--;
+            if (connections < 0) {
+                connections = 0;
             }
-        );
+        });
     }
 );
 
 
 // =====================================================
-// ERROS
+// ERRO DO PROXY
 // =====================================================
 
-proxy.on(
-    "error",
-    (error) => {
+proxy.on("error", (error) => {
+    console.error(
+        "❌ Erro do Proxy: " +
+        error.message
+    );
+});
 
-        console.error(
-            "❌ Proxy:",
-            error.message
-        );
-    }
-);
 
+// =====================================================
+// ERRO DO SERVIDOR HTTP
+// =====================================================
 
 server.on(
     "clientError",
@@ -452,16 +392,12 @@ server.on(
 // STATUS
 // =====================================================
 
-setInterval(
-    () => {
-
-        console.log(
-            `📊 Conexões ativas: ${connections}`
-        );
-
-    },
-    30000
-);
+setInterval(() => {
+    console.log(
+        "📊 Conexões ativas: " +
+        connections
+    );
+}, 30000);
 
 
 // =====================================================
@@ -474,51 +410,34 @@ server.listen(
     () => {
 
         console.log("");
-        console.log(
-            "========================================"
-        );
+        console.log("========================================");
+        console.log("🚀 EAGLERCRAFT WSS PROXY");
+        console.log("========================================");
 
         console.log(
-            "🚀 EAGLERCRAFT WSS PROXY"
-        );
-
-        console.log(
-            "========================================"
-        );
-
-        console.log(
-            `Porta: ${PORT}`
+            "Porta: " +
+            PORT
         );
 
         console.log("");
-
+        console.log("📡 ATERNOS:");
         console.log(
-            "📡 ATERNOS:"
-        );
-
-        console.log(
-            `${ATERNOS_HOST}:${ATERNOS_PORT}`
-        );
-
-        console.log("");
-
-        console.log(
-            "📡 FALIX:"
-        );
-
-        console.log(
-            `${FALIX_HOST}:${FALIX_PORT}`
+            ATERNOS_HOST +
+            ":" +
+            ATERNOS_PORT
         );
 
         console.log("");
-
+        console.log("📡 FALIX:");
         console.log(
-            "🟢 PROXY ONLINE"
+            FALIX_HOST +
+            ":" +
+            FALIX_PORT
         );
 
-        console.log(
-            "========================================"
-        );
+        console.log("");
+        console.log("🟢 PROXY ONLINE");
+        console.log("========================================");
     }
 );
 ```
