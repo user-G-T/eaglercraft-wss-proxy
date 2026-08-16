@@ -1,95 +1,86 @@
-
 const express = require("express");
 const http = require("http");
-const httpProxy = require("http-proxy");
+const WebSocket = require("ws");
 const dns = require("dns").promises;
 const net = require("net");
 
-const ATERNOS_HOST = process.env.ATERNOS_HOST || "mundoeterno_etec.aternos.me";
-const ATERNOS_PORT = Number(process.env.ATERNOS_PORT) || 49413;
+const ATERNOS_HOST =
+    process.env.ATERNOS_HOST || "mundoeterno_etec.aternos.me";
 
-const FALIX_HOST = process.env.FALIX_HOST || "mundoeternoetec.falix.me";
-const FALIX_PORT = Number(process.env.FALIX_PORT) || 22899;
+const ATERNOS_PORT =
+    Number(process.env.ATERNOS_PORT) || 49413;
 
-const PORT = Number(process.env.PORT) || 10000;
+const FALIX_HOST =
+    process.env.FALIX_HOST || "mundoeternoetec.falix.me";
+
+const FALIX_PORT =
+    Number(process.env.FALIX_PORT) || 22899;
+
+const PORT =
+    Number(process.env.PORT) || 10000;
 
 const app = express();
 const server = http.createServer(app);
 
 app.get("/", (req, res) => {
-    res.status(200).send("Eaglercraft WSS Proxy - Aternos + Falix");
+    res.status(200).send("Eaglercraft WSS Proxy online");
 });
 
 app.get("/health", (req, res) => {
     res.status(200).send("OK");
 });
 
-const proxy = httpProxy.createProxyServer({
-    ws: true,
-    changeOrigin: true,
-    proxyTimeout: 10000,
-    timeout: 15000,
+const wss = new WebSocket.Server({
+    noServer: true,
     perMessageDeflate: false
 });
 
-async function resolveHost(host) {
-    try {
-        const addresses = await dns.resolve4(host);
+async function resolveIPv4(host) {
+    const addresses = await dns.resolve4(host);
 
-        if (!addresses || addresses.length === 0) {
-            throw new Error("Nenhum IP encontrado para " + host);
-        }
+    if (!addresses || addresses.length === 0) {
+        throw new Error("Nenhum IP encontrado para " + host);
+    }
 
-        return addresses;
-    } catch (error) {
+    return addresses;
+}
+
+async function getServerTarget(pathname) {
+    let host;
+    let port;
+    let name;
+
+    if (pathname === "/aternos") {
+        host = ATERNOS_HOST;
+        port = ATERNOS_PORT;
+        name = "Aternos";
+    } else if (pathname === "/falix") {
+        host = FALIX_HOST;
+        port = FALIX_PORT;
+        name = "Falix";
+    } else {
         throw new Error(
-            "Erro ao resolver " + host + ": " + error.message
+            "Caminho inválido. Use /aternos ou /falix."
         );
     }
+
+    const ips = await resolveIPv4(host);
+
+    return {
+        name,
+        host,
+        port,
+        ip: ips[0]
+    };
 }
 
-async function getTargets() {
-    const targets = [];
-
-    try {
-        const ips = await resolveHost(FALIX_HOST);
-
-        for (const ip of ips) {
-            targets.push({
-                provider: "Falix",
-                host: FALIX_HOST,
-                ip: ip,
-                port: FALIX_PORT
-            });
-        }
-    } catch (error) {
-        console.log("Falix indisponível: " + error.message);
-    }
-
-    try {
-        const ips = await resolveHost(ATERNOS_HOST);
-
-        for (const ip of ips) {
-            targets.push({
-                provider: "Aternos",
-                host: ATERNOS_HOST,
-                ip: ip,
-                port: ATERNOS_PORT
-            });
-        }
-    } catch (error) {
-        console.log("Aternos indisponível: " + error.message);
-    }
-
-    return targets;
-}
-
-function testTCP(ip, port, timeout = 8000) {
-    return new Promise((resolve) => {
+function connectTCP(target) {
+    return new Promise((resolve, reject) => {
         const socket = new net.Socket();
+
         let finished = false;
 
-        function finish(result) {
+        function fail(error) {
             if (finished) {
                 return;
             }
@@ -100,176 +91,263 @@ function testTCP(ip, port, timeout = 8000) {
                 socket.destroy();
             } catch (_) {}
 
-            resolve(result);
+            reject(error);
         }
 
-        socket.setTimeout(timeout);
+        socket.setTimeout(10000);
 
-        socket.connect(port, ip, () => {
-            console.log("TCP OK: " + ip + ":" + port);
-            finish(true);
+        socket.once("connect", () => {
+            if (finished) {
+                return;
+            }
+
+            finished = true;
+
+            socket.setTimeout(0);
+
+            resolve(socket);
         });
 
-        socket.on("timeout", () => {
-            console.log("TCP TIMEOUT: " + ip + ":" + port);
-            finish(false);
-        });
-
-        socket.on("error", (error) => {
-            console.log(
-                "TCP ERRO: " +
-                ip +
-                ":" +
-                port +
-                " -> " +
-                (error.code || error.message)
+        socket.once("timeout", () => {
+            fail(
+                new Error(
+                    "Timeout ao conectar em " +
+                    target.host +
+                    ":" +
+                    target.port
+                )
             );
-
-            finish(false);
         });
+
+        socket.once("error", (error) => {
+            fail(error);
+        });
+
+        socket.connect(
+            target.port,
+            target.ip
+        );
     });
 }
 
-async function findWorkingServer() {
-    const targets = await getTargets();
-
-    if (targets.length === 0) {
-        throw new Error("Nenhum servidor foi encontrado.");
-    }
-
-    for (const target of targets) {
-        console.log(
-            "Testando " +
-            target.provider +
-            " em " +
-            target.ip +
-            ":" +
-            target.port
+server.on("upgrade", async (req, socket, head) => {
+    try {
+        const url = new URL(
+            req.url,
+            "http://" + req.headers.host
         );
 
-        const online = await testTCP(
-            target.ip,
-            target.port
-        );
+        const pathname = url.pathname;
 
-        if (online) {
-            console.log(
-                target.provider +
-                " ONLINE"
+        if (
+            pathname !== "/aternos" &&
+            pathname !== "/falix"
+        ) {
+            socket.write(
+                "HTTP/1.1 404 Not Found\r\n" +
+                "Connection: close\r\n" +
+                "\r\n"
             );
 
-            return target;
+            socket.destroy();
+            return;
         }
-    }
 
-    throw new Error(
-        "Nenhum dos servidores está online."
-    );
-}
-
-let connections = 0;
-
-server.on(
-    "upgrade",
-    async (req, socket, head) => {
-        connections++;
-
-        console.log(
-            "Nova conexão EagleCraft"
+        wss.handleUpgrade(
+            req,
+            socket,
+            head,
+            (ws) => {
+                wss.emit(
+                    "connection",
+                    ws,
+                    req,
+                    pathname
+                );
+            }
         );
 
+    } catch (error) {
         try {
-            const target = await findWorkingServer();
+            socket.destroy();
+        } catch (_) {}
+    }
+});
+
+wss.on(
+    "connection",
+    async (ws, req, pathname) => {
+
+        let tcp = null;
+        let closed = false;
+
+        function closeEverything() {
+            if (closed) {
+                return;
+            }
+
+            closed = true;
+
+            try {
+                if (tcp) {
+                    tcp.destroy();
+                }
+            } catch (_) {}
+
+            try {
+                if (
+                    ws.readyState === WebSocket.OPEN ||
+                    ws.readyState === WebSocket.CONNECTING
+                ) {
+                    ws.close();
+                }
+            } catch (_) {}
+        }
+
+        try {
+            const target =
+                await getServerTarget(pathname);
 
             console.log(
-                "Conectando ao " +
-                target.provider +
-                " em " +
-                target.ip +
+                "Nova conexão EagleCraft -> " +
+                target.name +
+                " " +
+                target.host +
                 ":" +
                 target.port
             );
 
-            proxy.ws(
-                req,
-                socket,
-                head,
-                {
-                    target:
-                        "ws://" +
-                        target.ip +
-                        ":" +
-                        target.port,
-
-                    ws: true,
-                    changeOrigin: true,
-                    perMessageDeflate: false
-                },
-                (error) => {
-                    if (error) {
-                        console.error(
-                            "Erro WebSocket: " +
-                            error.message
-                        );
-
-                        try {
-                            socket.destroy();
-                        } catch (_) {}
-                    }
-                }
+            console.log(
+                "IP resolvido: " +
+                target.ip
             );
+
+            tcp = await connectTCP(target);
+
+            console.log(
+                target.name +
+                " TCP conectado"
+            );
+
+            tcp.on("data", (data) => {
+                if (
+                    closed ||
+                    ws.readyState !== WebSocket.OPEN
+                ) {
+                    return;
+                }
+
+                try {
+                    ws.send(data);
+                } catch (error) {
+                    closeEverything();
+                }
+            });
+
+            tcp.on("error", (error) => {
+                console.error(
+                    "Erro TCP " +
+                    target.name +
+                    ": " +
+                    error.message
+                );
+
+                closeEverything();
+            });
+
+            tcp.on("close", () => {
+                closeEverything();
+            });
+
+            ws.on("message", (data, isBinary) => {
+                if (
+                    closed ||
+                    !tcp ||
+                    tcp.destroyed
+                ) {
+                    return;
+                }
+
+                try {
+                    if (Buffer.isBuffer(data)) {
+                        tcp.write(data);
+                    } else if (data instanceof ArrayBuffer) {
+                        tcp.write(
+                            Buffer.from(data)
+                        );
+                    } else if (
+                        Array.isArray(data)
+                    ) {
+                        tcp.write(
+                            Buffer.concat(data)
+                        );
+                    } else {
+                        tcp.write(
+                            Buffer.from(data)
+                        );
+                    }
+                } catch (error) {
+                    console.error(
+                        "Erro enviando para Minecraft: " +
+                        error.message
+                    );
+
+                    closeEverything();
+                }
+            });
+
+            ws.on("close", () => {
+                closeEverything();
+            });
+
+            ws.on("error", (error) => {
+                console.error(
+                    "Erro WebSocket: " +
+                    error.message
+                );
+
+                closeEverything();
+            });
+
         } catch (error) {
             console.error(
-                "Servidor indisponível: " +
+                "Falha ao conectar " +
+                pathname +
+                ": " +
                 error.message
             );
 
             try {
-                socket.destroy();
+                ws.close(
+                    1011,
+                    "Servidor indisponível"
+                );
+            } catch (_) {}
+
+            try {
+                if (tcp) {
+                    tcp.destroy();
+                }
             } catch (_) {}
         }
-
-        socket.once(
-            "close",
-            () => {
-                connections--;
-
-                if (connections < 0) {
-                    connections = 0;
-                }
-            }
-        );
     }
 );
 
-proxy.on(
-    "error",
-    (error) => {
-        console.error(
-            "Erro do Proxy: " +
-            error.message
-        );
-    }
-);
+process.on("uncaughtException", (error) => {
+    console.error(
+        "Erro inesperado: " +
+        error.message
+    );
+});
 
-server.on(
-    "clientError",
-    (error, socket) => {
-        if (!socket.destroyed) {
-            socket.destroy();
-        }
-    }
-);
-
-setInterval(
-    () => {
-        console.log(
-            "Conexões ativas: " +
-            connections
-        );
-    },
-    30000
-);
+process.on("unhandledRejection", (error) => {
+    console.error(
+        "Promise rejeitada: " +
+        (error && error.message
+            ? error.message
+            : error)
+    );
+});
 
 server.listen(
     PORT,
@@ -296,6 +374,14 @@ server.listen(
         console.log(
             "Porta: " +
             PORT
+        );
+
+        console.log(
+            "WSS Aternos: /aternos"
+        );
+
+        console.log(
+            "WSS Falix: /falix"
         );
     }
 );
