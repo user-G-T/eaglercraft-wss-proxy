@@ -5,17 +5,12 @@ const httpProxy = require("http-proxy");
 const dns = require("dns").promises;
 const net = require("net");
 
-const express = require("express");
-const http = require("http");
-const httpProxy = require("http-proxy");
-const dns = require("dns").promises;
-const net = require("net");
-
 // =====================================================
 // CONFIGURAÇÃO
 // =====================================================
 
-// ATERNOS
+// ---------------- ATERNOS ----------------
+
 const ATERNOS_DOMAIN =
     process.env.ATERNOS_DOMAIN ||
     "mundoeterno_etec.aternos.me";
@@ -23,7 +18,9 @@ const ATERNOS_DOMAIN =
 const ATERNOS_SRV =
     `_minecraft._tcp.${ATERNOS_DOMAIN}`;
 
-// FALIX
+
+// ---------------- FALIX ----------------
+
 const FALIX_DOMAIN =
     process.env.FALIX_DOMAIN ||
     "mundoeternoetec.falix.me";
@@ -31,23 +28,8 @@ const FALIX_DOMAIN =
 const FALIX_PORT =
     Number(process.env.FALIX_PORT) || 22899;
 
-// PORTA DO RENDER
-const PORT =
-    Number(process.env.PORT) || 10000;
 
-// ---------- FALIX ----------
-
-// Domínio do seu servidor Falix
-const FALIX_DOMAIN =
-    process.env.FALIX_DOMAIN ||
-    "mundoeternoetec.falix.me";
-
-// Porta atual do Falix
-const FALIX_PORT =
-    Number(process.env.FALIX_PORT) || 22899;
-
-
-// ---------- PROXY ----------
+// ---------------- RENDER ----------------
 
 const PORT =
     Number(process.env.PORT) || 10000;
@@ -62,7 +44,9 @@ const app = express();
 const server = http.createServer(app);
 
 
-// Página principal
+// =====================================================
+// ROTAS HTTP
+// =====================================================
 
 app.get("/", (req, res) => {
 
@@ -72,8 +56,6 @@ app.get("/", (req, res) => {
 
 });
 
-
-// Health check
 
 app.get("/health", (req, res) => {
 
@@ -94,52 +76,44 @@ const proxy = httpProxy.createProxyServer({
 
     proxyTimeout: 10000,
 
+    timeout: 15000,
+
     perMessageDeflate: false
 
 });
 
 
 // =====================================================
-// RESOLVER IP DO DOMÍNIO
+// RESOLVER IPV4
 // =====================================================
 
 async function resolveIPv4(hostname) {
 
-    try {
+    const addresses =
+        await dns.resolve4(hostname);
 
-        const ips =
-            await dns.resolve4(hostname);
-
-        if (!ips.length) {
-
-            throw new Error(
-                `Nenhum IPv4 encontrado para ${hostname}`
-            );
-
-        }
-
-        return ips;
-
-    } catch (error) {
+    if (!addresses || addresses.length === 0) {
 
         throw new Error(
-            `Não conseguiu resolver ${hostname}: ${error.message}`
+            `Nenhum endereço IPv4 encontrado para ${hostname}`
         );
 
     }
+
+    return addresses;
 
 }
 
 
 // =====================================================
-// DESCOBRIR DESTINOS ATERNOS VIA SRV
+// ATERNOS - SRV
 // =====================================================
 
 async function getAternosTargets() {
 
     console.log("");
     console.log("========================================");
-    console.log("🔎 PROCURANDO ATERNOS VIA SRV");
+    console.log("🔎 ATERNOS");
     console.log("========================================");
 
     console.log(
@@ -147,22 +121,32 @@ async function getAternosTargets() {
     );
 
 
-    const srv =
-        await dns.resolveSrv(ATERNOS_SRV);
+    let records;
 
+    try {
 
-    if (!srv.length) {
+        records =
+            await dns.resolveSrv(ATERNOS_SRV);
+
+    } catch (error) {
 
         throw new Error(
-            "Nenhum registro SRV do Aternos encontrado."
+            `Falha ao consultar SRV do Aternos: ${error.message}`
         );
 
     }
 
 
-    // Ordenar por prioridade e peso
+    if (!records || records.length === 0) {
 
-    srv.sort((a, b) => {
+        throw new Error(
+            "Nenhum registro SRV encontrado no Aternos."
+        );
+
+    }
+
+
+    records.sort((a, b) => {
 
         if (a.priority !== b.priority) {
 
@@ -178,17 +162,17 @@ async function getAternosTargets() {
     const targets = [];
 
 
-    for (const record of srv) {
+    for (const record of records) {
 
         const hostname =
             record.name.replace(/\.$/, "");
 
         const port =
-            record.port;
+            Number(record.port);
 
 
         console.log("");
-        console.log("📡 SRV Aternos encontrado:");
+        console.log("📡 Registro SRV:");
 
         console.log(
             `   Host: ${hostname}`
@@ -202,7 +186,7 @@ async function getAternosTargets() {
         try {
 
             const ips =
-                await dns.resolve4(hostname);
+                await resolveIPv4(hostname);
 
 
             for (const ip of ips) {
@@ -216,11 +200,11 @@ async function getAternosTargets() {
 
                     provider: "Aternos",
 
-                    hostname,
+                    hostname: hostname,
 
-                    ip,
+                    ip: ip,
 
-                    port
+                    port: port
 
                 });
 
@@ -229,8 +213,7 @@ async function getAternosTargets() {
         } catch (error) {
 
             console.error(
-                `❌ Erro DNS ${hostname}:`,
-                error.message
+                `❌ Falha ao resolver ${hostname}: ${error.message}`
             );
 
         }
@@ -244,14 +227,14 @@ async function getAternosTargets() {
 
 
 // =====================================================
-// DESCOBRIR DESTINOS FALIX
+// FALIX
 // =====================================================
 
 async function getFalixTargets() {
 
     console.log("");
     console.log("========================================");
-    console.log("🔎 PROCURANDO FALIX");
+    console.log("🔎 FALIX");
     console.log("========================================");
 
     console.log(
@@ -263,8 +246,20 @@ async function getFalixTargets() {
     );
 
 
-    const ips =
-        await resolveIPv4(FALIX_DOMAIN);
+    let ips;
+
+    try {
+
+        ips =
+            await resolveIPv4(FALIX_DOMAIN);
+
+    } catch (error) {
+
+        throw new Error(
+            `Falha ao resolver Falix: ${error.message}`
+        );
+
+    }
 
 
     const targets = [];
@@ -283,7 +278,7 @@ async function getFalixTargets() {
 
             hostname: FALIX_DOMAIN,
 
-            ip,
+            ip: ip,
 
             port: FALIX_PORT
 
@@ -298,7 +293,7 @@ async function getFalixTargets() {
 
 
 // =====================================================
-// TESTAR TCP
+// TESTE TCP
 // =====================================================
 
 function testTCP(
@@ -314,9 +309,6 @@ function testTCP(
 
         let finished = false;
 
-        const start =
-            Date.now();
-
 
         function finish(result) {
 
@@ -325,7 +317,6 @@ function testTCP(
                 return;
 
             }
-
 
             finished = true;
 
@@ -350,14 +341,9 @@ function testTCP(
             ip,
             () => {
 
-                const time =
-                    Date.now() - start;
-
-
                 console.log(
-                    `🟢 TCP OK ${ip}:${port} (${time}ms)`
+                    `🟢 TCP OK ${ip}:${port}`
                 );
-
 
                 finish(true);
 
@@ -365,7 +351,7 @@ function testTCP(
         );
 
 
-        socket.on(
+        socket.once(
             "timeout",
             () => {
 
@@ -373,21 +359,19 @@ function testTCP(
                     `🔴 TCP TIMEOUT ${ip}:${port}`
                 );
 
-
                 finish(false);
 
             }
         );
 
 
-        socket.on(
+        socket.once(
             "error",
             (error) => {
 
                 console.log(
                     `🔴 TCP ERRO ${ip}:${port} → ${error.code || error.message}`
                 );
-
 
                 finish(false);
 
@@ -400,7 +384,7 @@ function testTCP(
 
 
 // =====================================================
-// TESTAR TODOS OS DESTINOS
+// ENCONTRAR SERVIDOR ONLINE
 // =====================================================
 
 async function findWorkingTarget() {
@@ -409,24 +393,23 @@ async function findWorkingTarget() {
 
 
     // =================================================
-    // FALIX
+    // TENTAR FALIX
     // =================================================
 
     try {
 
-        const falix =
+        const falixTargets =
             await getFalixTargets();
 
-
         targets.push(
-            ...falix
+            ...falixTargets
         );
 
     } catch (error) {
 
         console.error("");
         console.error(
-            "⚠️ Falix não pôde ser localizado:"
+            "⚠️ Falix indisponível:"
         );
 
         console.error(
@@ -437,24 +420,23 @@ async function findWorkingTarget() {
 
 
     // =================================================
-    // ATERNOS
+    // TENTAR ATERNOS
     // =================================================
 
     try {
 
-        const aternos =
+        const aternosTargets =
             await getAternosTargets();
 
-
         targets.push(
-            ...aternos
+            ...aternosTargets
         );
 
     } catch (error) {
 
         console.error("");
         console.error(
-            "⚠️ Aternos não pôde ser localizado:"
+            "⚠️ Aternos indisponível:"
         );
 
         console.error(
@@ -464,14 +446,10 @@ async function findWorkingTarget() {
     }
 
 
-    // =================================================
-    // NENHUM DESTINO ENCONTRADO
-    // =================================================
-
-    if (!targets.length) {
+    if (targets.length === 0) {
 
         throw new Error(
-            "Nenhum destino foi encontrado."
+            "Nenhum servidor foi encontrado."
         );
 
     }
@@ -484,30 +462,29 @@ async function findWorkingTarget() {
 
 
     // =================================================
-    // TESTAR UM POR UM
+    // TESTAR DESTINOS
     // =================================================
 
     for (const target of targets) {
 
         console.log("");
-
         console.log(
             `🔎 Testando ${target.provider}`
         );
 
         console.log(
-            `   ${target.hostname}:${target.port}`
+            `   ${target.ip}:${target.port}`
         );
 
 
-        const ok =
+        const online =
             await testTCP(
                 target.ip,
                 target.port
             );
 
 
-        if (ok) {
+        if (online) {
 
             console.log("");
             console.log("========================================");
@@ -517,7 +494,6 @@ async function findWorkingTarget() {
             );
 
             console.log("========================================");
-
 
             console.log(
                 `Host: ${target.hostname}`
@@ -531,7 +507,6 @@ async function findWorkingTarget() {
                 `Porta: ${target.port}`
             );
 
-
             console.log("========================================");
 
 
@@ -543,18 +518,22 @@ async function findWorkingTarget() {
 
 
     throw new Error(
-        "Aternos e Falix foram encontrados, mas nenhum está aceitando conexões."
+        "Nenhum servidor está aceitando conexões TCP."
     );
 
 }
 
 
 // =====================================================
-// WEBSOCKET
+// CONEXÕES EAGLERCRAFT
 // =====================================================
 
 let connections = 0;
 
+
+// =====================================================
+// WEBSOCKET UPGRADE
+// =====================================================
 
 server.on(
     "upgrade",
@@ -577,23 +556,13 @@ server.on(
 
             console.log("");
             console.log(
-                `🔗 Servidor escolhido: ${target.provider}`
+                `🔗 Encaminhando para ${target.provider}`
             );
-
 
             console.log(
-                `   ${target.hostname}:${target.port}`
+                `${target.ip}:${target.port}`
             );
 
-
-            console.log(
-                `   IP: ${target.ip}`
-            );
-
-
-            // =========================================
-            // ENCAMINHAR WEBSOCKET
-            // =========================================
 
             proxy.ws(
                 req,
@@ -637,11 +606,9 @@ server.on(
         } catch (error) {
 
             console.error("");
-
             console.error(
                 "❌ NENHUM SERVIDOR DISPONÍVEL"
             );
-
 
             console.error(
                 error.message
@@ -671,7 +638,7 @@ server.on(
 
 
 // =====================================================
-// ERROS DO PROXY
+// ERRO DO PROXY
 // =====================================================
 
 proxy.on(
@@ -679,7 +646,7 @@ proxy.on(
     (error) => {
 
         console.error(
-            "❌ Erro do Proxy:",
+            "❌ Erro do proxy:",
             error.message
         );
 
@@ -688,7 +655,7 @@ proxy.on(
 
 
 // =====================================================
-// ERROS HTTP
+// ERRO DO SERVIDOR
 // =====================================================
 
 server.on(
@@ -731,52 +698,39 @@ server.listen(
     () => {
 
         console.log("");
-
         console.log("========================================");
         console.log("🚀 EAGLERCRAFT WSS PROXY");
         console.log("========================================");
 
-
         console.log(
-            `Porta do Proxy: ${PORT}`
+            `Porta: ${PORT}`
         );
-
 
         console.log("");
-        console.log("📡 ATERNOS:");
+        console.log("📡 ATERNOS");
 
         console.log(
-            `   Domínio: ${ATERNOS_DOMAIN}`
+            `Domínio: ${ATERNOS_DOMAIN}`
         );
 
         console.log(
-            `   SRV: ${ATERNOS_SRV}`
+            `SRV: ${ATERNOS_SRV}`
         );
-
 
         console.log("");
-        console.log("📡 FALIX:");
+        console.log("📡 FALIX");
 
         console.log(
-            `   Domínio: ${FALIX_DOMAIN}`
+            `Domínio: ${FALIX_DOMAIN}`
         );
 
         console.log(
-            `   Porta: ${FALIX_PORT}`
+            `Porta: ${FALIX_PORT}`
         );
-
 
         console.log("");
         console.log("========================================");
-
-        console.log(
-            "🟢 Proxy iniciado."
-        );
-
-        console.log(
-            "🟢 Aguardando conexões EagleCraft..."
-        );
-
+        console.log("🟢 PROXY ONLINE");
         console.log("========================================");
 
     }
