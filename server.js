@@ -5,12 +5,17 @@ const httpProxy = require("http-proxy");
 const dns = require("dns").promises;
 const net = require("net");
 
+const express = require("express");
+const http = require("http");
+const httpProxy = require("http-proxy");
+const dns = require("dns").promises;
+const net = require("net");
+
 // =====================================================
 // CONFIGURAÇÃO
 // =====================================================
 
-// ---------- ATERNOS ----------
-
+// ATERNOS
 const ATERNOS_DOMAIN =
     process.env.ATERNOS_DOMAIN ||
     "mundoeterno_etec.aternos.me";
@@ -18,6 +23,17 @@ const ATERNOS_DOMAIN =
 const ATERNOS_SRV =
     `_minecraft._tcp.${ATERNOS_DOMAIN}`;
 
+// FALIX
+const FALIX_DOMAIN =
+    process.env.FALIX_DOMAIN ||
+    "mundoeternoetec.falix.me";
+
+const FALIX_PORT =
+    Number(process.env.FALIX_PORT) || 22899;
+
+// PORTA DO RENDER
+const PORT =
+    Number(process.env.PORT) || 10000;
 
 // ---------- FALIX ----------
 
