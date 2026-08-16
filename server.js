@@ -332,5 +332,3 @@ server.listen(
         console.log("========================================");
     }
 );
-
-esse era pro aternos, eu queria um que funcionasse tanto pro aternos quanto para ele
