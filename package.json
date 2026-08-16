@@ -1,6 +1,7 @@
 {
   "name": "eaglercraft-wss-proxy",
   "version": "1.0.0",
+  "description": "EaglercraftX WSS proxy for Aternos",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
